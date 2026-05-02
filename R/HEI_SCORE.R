@@ -43,6 +43,7 @@ score_fattyacid <- function(monopoly_g, satfat_g, max_pts = 10) {
   if (ratio <= 1.2) return(0)
   max_pts * (ratio - 1.2) / (2.5 - 1.2)
 }
+
 compute_hei <- function(food_list, fped, fndds) {
 
   diet <- food_list %>%
@@ -100,6 +101,8 @@ compute_hei <- function(food_list, fped, fndds) {
   return(sum(scores))
 }
 
+
+
 # read in datasets
 library(readxl)
 FNDDS_nutrients <- read_excel("dataraw/FNDDS_nutrients.xlsx",
@@ -107,6 +110,18 @@ FNDDS_nutrients <- read_excel("dataraw/FNDDS_nutrients.xlsx",
 
 
 FPED_1718 <- read_excel("dataraw/FPED_1718.xls")
+
+FNDDS_nutrients <- FNDDS_nutrients %>%
+  rename(FOODCODE = `Food code`,
+         KCAL   = `Energy (kcal)`,
+         SODIUM = `Sodium (mg)`,
+         SATFAT = `Fatty acids, total saturated (g)`,
+         MUFA   = `Fatty acids, total monounsaturated (g)`,
+         PUFA   = `Fatty acids, total polyunsaturated (g)`)
+
+FPED_1718 <- FPED_1718 %>%
+  rename_with(~ gsub(" \\(.*\\)", "", .x))
+
 library(tibble)
 
 # example list of foods
@@ -123,5 +138,16 @@ food_list <- tibble(
   )
 )
 
-hei_score_test <- compute_hei(food_list, fped_raw, fndds)
+diet <- food_list %>%
+  left_join(FPED_1718, by = "FOODCODE") %>%
+  left_join(FNDDS_nutrients, by = "FOODCODE")
+
+diet %>%
+  summarise(
+    # missing_fped  = sum(is.na(F_TOTAL)),
+    missing_kcal  = sum(is.na(KCAL))
+  )
+
+hei_score_test <- compute_hei(food_list, FPED_1718, FNDDS_nutrients)
 hei_score_test
+
