@@ -138,15 +138,6 @@ food_list <- tibble(
   )
 )
 
-diet <- food_list %>%
-  left_join(FPED_1718, by = "FOODCODE") %>%
-  left_join(FNDDS_nutrients, by = "FOODCODE")
-
-diet %>%
-  summarise(
-    # missing_fped  = sum(is.na(F_TOTAL)),
-    missing_kcal  = sum(is.na(KCAL))
-  )
 
 hei_score_test <- compute_hei(food_list, FPED_1718, FNDDS_nutrients)
 hei_score_test
