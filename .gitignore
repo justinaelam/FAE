@@ -2,3 +2,5 @@
 .Rhistory
 .RData
 .Ruserdata
+dataraw/food_attribute.csv
+dataraw/branded_food.csv
