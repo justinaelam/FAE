@@ -1,0 +1,407 @@
+---
+title: "Testing Code - 2026"
+output: html_document
+date: "2026-05-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## README: For steps 1 and 3 I am unsure if we want to work with a big merged dataframe or a list of dataframes, so I kind of do both
+
+# Load required libraries
+```{r }
+library(installr) # Making sure we have latest R version
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(stringr)
+
+library(duckdb)
+library(DBI)
+
+library(purrr)
+library(tools)
+
+# updateR()
+```
+
+## Load in Nielsen Data
+```{r}
+stores <- read_tsv("G:\\Shared drives\\Nielsen Scanner\\Data\\01_Annual_Files\\stores.tsv")
+product_attri_prev <- read_tsv("G:\\Shared drives\\Nielsen Scanner\\Data\\01_Annual_Files\\productattributes.tsv", n_max = 100)
+
+```
+
+
+
+## Step 1: Load in the two week MA data and merge
+```{r}
+load_tag_and_merge <- function(folder, files = NULL, ...) {
+  if (is.null(files)) {
+    files <- list.files(folder, pattern = "\\.csv$", full.names = FALSE)
+  }
+  
+  # get a list of paths
+  paths <- file.path(folder, files)
+
+  # add column to each row specifying what csv it came from
+  dfs <- lapply(paths, function(p) {
+    df <- read.csv(p, ...)
+    df$type <- sub("_.*", "", tools::file_path_sans_ext(basename(p)))
+    df
+  })
+  names(dfs) <- tools::file_path_sans_ext(basename(files))
+
+  # merge all the datasets
+  merged <- do.call(rbind, dfs)
+  rownames(merged) <- NULL
+
+  list(dfs = dfs, merged = merged)
+}
+
+MA_twoweeks <- "G:\\Shared drives\\Nielsen Scanner\\Data\\MA_twoweeks"
+
+result <- load_tag_and_merge(MA_twoweeks)
+dfs    <- result$dfs      # list of data.frames (one per category CSV)
+merged <- result$merged   # one combined data.frame (all stores, all categories)
+
+# NOTE: upc's are stored as numeric so they may drop the leading 0's
+merged <- merged %>%
+  mutate(upc_chr = sprintf("%.0f", upc))
+
+# Making one data frame per store
+by_store <- split(merged, merged$store_code_uc)
+
+length(by_store)                 # number of MA stores in this extract
+names(by_store)[1:5]             # store codes as list names
+head(by_store[[1]])              # peek at one store
+```
+
+Keep `merged` as the full panel. Split into a **named list** keyed by `store_code_uc` for per-store work (HEI, variety scores, etc.).
+
+
+## Step 2: Link Nielsen UPCs to Jus FNDDS/branded data (`newdf`) — diagnostics + multi-rule match
+
+```{r step2-setup}
+lab_dir <- "c:/Users/hughc/OneDrive/Desktop/Spring 2026/FAE Lab"
+nielsen_root <- "G:/Shared drives/Nielsen Scanner/Data"
+path_productdesc <- file.path(nielsen_root, "01_Annual_Files/productdesc.tsv")
+
+# --- helpers: digit strings and join keys ---
+digits_only <- function(x) {
+  d <- str_remove_all(as.character(x), "[^0-9]")
+  ifelse(is.na(d) | d == "", NA_character_, d)
+}
+
+pad12_last <- function(d) {
+  str_sub(str_pad(d, 12, side = "left", pad = "0"), -12L)
+}
+
+add_nielsen_keys <- function(df, upc_col = "upc_chr") {
+  d <- digits_only(df[[upc_col]])
+  df %>%
+    mutate(
+      upc_digits = d,
+      upc_digit_len = nchar(upc_digits),
+      key_last12 = pad12_last(upc_digits)
+    )
+}
+
+add_gtin_keys <- function(df, gtin_col = "gtin_upc") {
+  d <- digits_only(df[[gtin_col]])
+  df %>%
+    mutate(
+      gtin_digits = d,
+      gtin_digit_len = nchar(gtin_digits),
+      key_last12 = pad12_last(gtin_digits),
+      key_gtin13_body = if_else(gtin_digit_len == 13L, str_sub(gtin_digits, 1, 12), NA_character_),
+      key_gtin14_body = if_else(gtin_digit_len == 14L, str_sub(gtin_digits, 2, 13), NA_character_),
+      # Force character even if column is all NA (prevents logical type)
+      key_exact = as.character(gtin_digits)
+    )
+}
+```
+
+```{r step2-foodgroups, message = FALSE}
+# Jus pipeline -> object `newdf` (FOODCODE, nutrients, MyPlate flags, fdc_id, gtin_upc)
+setwd(lab_dir)
+source("foodgroups.R")
+```
+
+```{r step2-gtin-audit}
+# --- A) GTIN quality in Jus `newdf`
+gtin_audit_newdf <- newdf %>%
+  mutate(
+    gtin_digits = digits_only(gtin_upc),
+    gtin_digit_len = nchar(gtin_digits)
+  ) %>%
+  summarise(
+    n_fndds_rows = n(),
+    n_missing_gtin = sum(is.na(gtin_upc) | str_trim(gtin_upc) == ""),
+    n_with_gtin = sum(!is.na(gtin_upc) & str_trim(gtin_upc) != ""),
+    n_with_digits = sum(!is.na(gtin_digits)),
+    pct_missing_gtin = round(100 * n_missing_gtin / n_fndds_rows, 1),
+    n_unique_gtin = n_distinct(gtin_digits, na.rm = TRUE),
+    n_unique_fdc_id = n_distinct(fdc_id, na.rm = TRUE)
+  )
+
+gtin_len_dist_newdf <- newdf %>%
+  mutate(gtin_digit_len = nchar(digits_only(gtin_upc))) %>%
+  count(gtin_digit_len, name = "n_rows", sort = TRUE) %>%
+  mutate(pct = round(100 * n_rows / sum(n_rows), 1))
+
+# Duplicate GTINs in newdf (many FNDDS codes can share one barcode)
+gtin_dupes_newdf <- newdf %>%
+  mutate(gtin_digits = digits_only(gtin_upc)) %>%
+  filter(!is.na(gtin_digits)) %>%
+  count(gtin_digits, name = "n_fndds_rows") %>%
+  filter(n_fndds_rows > 1) %>%
+  arrange(desc(n_fndds_rows))
+
+print(gtin_audit_newdf)
+print(head(gtin_len_dist_newdf, 10))
+cat("GTINs linked to >1 FNDDS row:", nrow(gtin_dupes_newdf), "\n")
+```
+
+```{r step2-nielsen-products}
+# --- B) Nielsen product catalog from our bi-weekly `merged` panel ---
+nielsen_products <- merged %>%
+  group_by(upc_chr, type) %>%
+  summarise(
+    n_stores = n_distinct(store_code_uc),
+    total_units_sold = sum(units, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  add_nielsen_keys()
+
+# Optional: attach Nielsen product descriptions (for "NO PACKAGE" diagnostics)
+if (file.exists(path_productdesc)) {
+  con_desc <- dbConnect(duckdb())
+
+  dbWriteTable(
+    con_desc, "nielsen_upc_list",
+    nielsen_products %>%
+      distinct(upc_digits) %>%
+      filter(!is.na(upc_digits), upc_digits != ""),
+    temporary = TRUE
+  )
+
+  # Match on digits only (productdesc upc may be string or numeric in the TSV)
+  path_productdesc_sql <- gsub("'", "''", path_productdesc)
+  product_desc <- dbGetQuery(con_desc, sprintf("
+    SELECT
+      regexp_replace(trim(cast(p.upc AS VARCHAR)), '[^0-9]', '', 'g') AS upc_digits,
+      any_value(p.product_descr) AS product_descr
+    FROM read_csv_auto('%s', delim = '\\t', header = TRUE) p
+    INNER JOIN nielsen_upc_list u
+      ON regexp_replace(trim(cast(p.upc AS VARCHAR)), '[^0-9]', '', 'g') = u.upc_digits
+    GROUP BY 1
+  ", path_productdesc_sql))
+
+  dbDisconnect(con_desc, shutdown = TRUE)
+
+  nielsen_products <- nielsen_products %>%
+    left_join(product_desc, by = "upc_digits") %>%
+    mutate(
+      is_no_package = str_detect(toupper(coalesce(product_descr, "")), "NO PACKAGE")
+    )
+} else {
+  nielsen_products <- nielsen_products %>%
+    mutate(product_descr = NA_character_, is_no_package = NA)
+  warning("productdesc.tsv not found; is_no_package will be NA.")
+}
+```
+
+```{r step2-fdc-lookup}
+# --- C) FDC / FNDDS lookup from `newdf` (one row per gtin_digits + fdc_id) ---
+fdc_cols <- c(
+  "fdc_id", "gtin_upc", "FOODCODE", "DESCRIPTION",
+  "KCAL", "SODIUM", "SATFAT", "MUFA", "PUFA",
+  "is_veg", "is_fruit", "is_whole_grain", "is_refined_grain",
+  "is_protein", "is_dairy", "is_oil", "is_added_sugar", "is_solid_fat"
+)
+fdc_cols <- intersect(fdc_cols, names(newdf))
+
+fdc_lookup <- newdf %>%
+  select(all_of(fdc_cols)) %>%
+  filter(!is.na(gtin_upc), str_trim(gtin_upc) != "") %>%
+  add_gtin_keys() %>%
+  mutate(
+    across(
+      any_of(c("key_last12", "key_gtin13_body", "key_gtin14_body", "key_exact")),
+      as.character
+    )
+  ) %>%
+  distinct(fdc_id, gtin_digits, .keep_all = TRUE)
+```
+
+```{r step2-match-rules}
+# --- D) Try several join rules; record which rule hit ---
+match_rules <- list(
+  last12_eq_last12       = c("key_last12", "key_last12"),
+  nielsen12_eq_gtin13body = c("key_last12", "key_gtin13_body"),
+  nielsen12_eq_gtin14body = c("key_last12", "key_gtin14_body"),
+  exact_digits           = c("upc_digits", "key_exact")
+)
+
+match_hits <- imap_dfr(match_rules, function(cols, rule_name) {
+  n_key <- cols[1]
+  f_key <- cols[2]
+
+  nielsen_products %>%
+    filter(!is.na(.data[[n_key]])) %>%
+    inner_join(
+      fdc_lookup %>% filter(!is.na(.data[[f_key]])),
+      by = setNames(f_key, n_key),
+      relationship = "many-to-many"
+    ) %>%
+    transmute(
+      upc_chr, type, match_rule = rule_name,
+      n_stores, total_units_sold,
+      product_descr, is_no_package,
+      fdc_id, gtin_upc, FOODCODE, DESCRIPTION,
+      across(any_of(c(
+        "is_veg", "is_fruit", "is_whole_grain", "is_refined_grain",
+        "is_protein", "is_dairy", "is_oil", "is_added_sugar", "is_solid_fat",
+        "KCAL", "SODIUM", "SATFAT", "MUFA", "PUFA"
+      )))
+    )
+})
+
+rule_priority <- c(
+  "exact_digits",
+  "nielsen12_eq_gtin13body",
+  "last12_eq_last12",
+  "nielsen12_eq_gtin14body"
+)
+
+# One best row per Nielsen product (upc_chr + type)
+nielsen_fdc_best <- match_hits %>%
+  mutate(match_rule = factor(match_rule, levels = rule_priority)) %>%
+  group_by(upc_chr, type) %>%
+  arrange(match_rule, desc(total_units_sold), FOODCODE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(matched = TRUE)
+
+# --- E) Match-rate summary: overall, by rule, by category, by NO PACKAGE ---
+n_distinct_upc <- nielsen_products %>% distinct(upc_chr) %>% nrow()
+
+match_summary_overall <- tibble(
+  n_nielsen_upc_type = nrow(nielsen_products),
+  n_distinct_upc = n_distinct_upc,
+  n_matched_upc_type = nrow(nielsen_fdc_best),
+  n_matched_distinct_upc = n_distinct(nielsen_fdc_best$upc_chr),
+  pct_matched_upc_type = round(100 * n_matched_upc_type / n_nielsen_upc_type, 1),
+  pct_matched_distinct_upc = round(100 * n_matched_distinct_upc / n_distinct_upc, 1)
+)
+
+match_by_rule <- match_hits %>%
+  distinct(upc_chr, type, match_rule) %>%
+  count(match_rule, name = "n_upc_type") %>%
+  mutate(pct = round(100 * n_upc_type / nrow(nielsen_products), 1)) %>%
+  arrange(desc(n_upc_type))
+
+match_by_type <- nielsen_fdc_best %>%
+  count(type, name = "n_matched") %>%
+  right_join(count(nielsen_products, type), by = "type") %>%
+  rename(n_total = n) %>%
+  mutate(
+    n_matched = coalesce(n_matched, 0L),
+    pct_matched = round(100 * n_matched / n_total, 1)
+  ) %>%
+  arrange(type)
+
+match_by_no_package <- if (all(is.na(nielsen_products$is_no_package))) {
+  tibble(note = "product_descr not available")
+} else {
+  nielsen_products %>%
+    left_join(
+      nielsen_fdc_best %>% select(upc_chr, type, fdc_id),
+      by = c("upc_chr", "type")
+    ) %>%
+    mutate(matched = !is.na(fdc_id)) %>%
+    group_by(is_no_package) %>%
+    summarise(
+      n_products = n(),
+      n_matched = sum(matched),
+      pct_matched = round(100 * n_matched / n_products, 1),
+      total_units = sum(total_units_sold),
+      .groups = "drop"
+    )
+}
+
+match_summary_overall
+match_by_rule
+match_by_type
+match_by_no_package
+```
+
+```{r step2-merge-to-panel}
+# --- F) Attach best match to transaction-level `merged` and product summary ---
+merged_linked <- merged %>%
+  left_join(
+    nielsen_fdc_best %>%
+      select(
+        upc_chr, type, match_rule, fdc_id, gtin_upc, FOODCODE, DESCRIPTION,
+        starts_with("is_"), KCAL, SODIUM, SATFAT, MUFA, PUFA
+      ),
+    by = c("upc_chr", "type")
+  ) %>%
+  mutate(matched_fdc = !is.na(fdc_id))
+
+# For Step 3: product_summary with match flags
+product_summary <- nielsen_products %>%
+  left_join(
+    nielsen_fdc_best %>%
+      select(upc_chr, type, match_rule, fdc_id, FOODCODE, matched),
+  by = c("upc_chr", "type")
+  ) %>%
+  mutate(matched = coalesce(matched, FALSE))
+
+# Save diagnostics (optional)
+write_csv(match_summary_overall, file.path(lab_dir, "step2_match_summary_overall.csv"))
+write_csv(match_by_rule, file.path(lab_dir, "step2_match_by_rule.csv"))
+write_csv(match_by_type, file.path(lab_dir, "step2_match_by_type.csv"))
+write_csv(
+  nielsen_fdc_best %>%
+    select(upc_chr, type, match_rule, fdc_id, gtin_upc, FOODCODE, DESCRIPTION, product_descr),
+  file.path(lab_dir, "step2_nielsen_fdc_best.csv")
+)
+
+cat("Rows in merged_linked:", nrow(merged_linked),
+    "| matched rows:", sum(merged_linked$matched_fdc),
+    "(", round(100 * mean(merged_linked$matched_fdc), 1), "%)\n")
+```
+
+## Step 3: product-level summary (one merged table)
+
+`product_summary` is built in Step 2 (store counts, units sold, FDC match flags). Re-run Step 1 alone if you only need the base summary without FDC columns.
+
+```{r step3-product-summary}
+product_summary <- product_summary %>%
+  arrange(type, desc(n_stores), desc(total_units_sold))
+
+head(product_summary, 20)
+```
+
+Later, top-20-by-type is easier from a **list** (one small table per `type`) than from one giant ranked table:
+
+```{r step3-top20-by-type-preview}
+top20_by_type <- product_summary %>%
+  group_by(type) %>%
+  slice_max(order_by = total_units_sold, n = 20, with_ties = FALSE) %>%
+  ungroup()
+
+# Or split into a list: top20_by_type_list[["VEGETABLES"]], etc.
+top20_by_type_list <- split(
+  top20_by_type,
+  top20_by_type$type
+)
+```
+
