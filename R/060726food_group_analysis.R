@@ -2,6 +2,7 @@
 # GOAL: For each branded_food product, identify which FPED food groups
 # are present based on ingredient keywords --> map those to FPED FOODCODEs --> sum the FPED equivalent
 # values per product --> combine with per-100g nutrient values to compute HEI scores
+
 # ---------- Food Group Classification + FPED Nutrient Lookup -------
 
 
@@ -45,12 +46,21 @@ df <- df %>%
     fiber_100g          = `Fiber, total dietary`      * scale,
     sugar_100g          = `Sugars, Total`             * scale,
     added_sugar_100g    = `Sugars, added`             * scale
-  ) %>%
-  # Remove extreme outliers (likely data entry errors)
-  filter(
-    is.na(sodium_100g)    | sodium_100g    < 10000,   # >10g Na/100g is impossible
-    is.na(calories_100g)  | calories_100g  < 2000     # >2000 kcal/100g is impossible
-  )
+  ) # %>%
+  # # Remove extreme outliers (likely data entry errors)
+  # filter(
+  #   is.na(sodium_100g)    | sodium_100g    < 10000,   # >10g Na/100g is impossible
+  #   is.na(calories_100g)  | calories_100g  < 2000     # >2000 kcal/100g is impossible
+  # )
+
+# x <- df2 %>%
+#   filter(
+#     sodium_100g   >= 10000 |
+#       calories_100g >= 2000
+#   ) %>%
+#   select(fdc_id, ingredients, serving_size, serving_size_g, sodium_100g, calories_100g)
+
+
 
 #  ----- KEYWORD-BASED FOOD GROUP CLASSIFICATION (from ingredients column) ---
 
@@ -368,30 +378,32 @@ print(unmatched)
 
 # --- COLLAPSE TO ONE ROW PER PRODUCT ----
 # sum FPED nutrient equivalents across all matched ingredient FOODCODE pairs
+
 df_wide <- df_with_fped %>%
-  group_by(fdc_id, gtin_upc) %>%
+  group_by(fdc_id) %>%
   summarise(
+    gtin_upc            = first(gtin_upc),
     food_groups_matched = paste(unique(food_group), collapse = ", "),
-    foodcodes_matched   = paste(unique(FOODCODE), collapse = ", "),
+    foodcodes_matched   = paste(unique(FOODCODE),   collapse = ", "),
     n_matches           = n(),
-    # Sum FPED nutrient equivalents across all matched food codes
     across(all_of(nutrient_cols), ~ sum(.x, na.rm = TRUE)),
     .groups = "drop"
   )
+
 cat("\ndf_wide rows:", nrow(df_wide), "(should equal matched products above)\n")
 
 # ---------------------------------------
 cat("\n\nBranded products matched to FPED FOODCODEs (first 20 rows):\n")
 df_with_fped %>%
   select(fdc_id, food_group, ingredient_keyword, FOODCODE, fped_description) %>%
-  head(50) %>%
+  head(20) %>%
   print()
 
 cat("\n\nCount of FPED matches per branded product:\n")
 df_with_fped %>%
   count(fdc_id, name = "n_fped_matches") %>%
   arrange(desc(n_fped_matches)) %>%
-  print(n = 50)
+  print(n = 43)
 
 df_with_fped %>% distinct(fdc_id) %>% nrow()
 
@@ -410,5 +422,5 @@ food_group_summary
 ing <- fped_lookup %>%
             select(food_group, ingredient_keyword, FOODCODE, fped_description)
 
-# D) Full match: branded products × FPED FOODCODEs × all nutrient equivalents
+# D) Full match of all the matched products
 df_with_fped
