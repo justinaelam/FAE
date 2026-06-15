@@ -513,6 +513,7 @@ dropped_rows <- hei_input %>%
   )
 
 dropped_rows
+#figure out if dropped_rows should be used to calculate hei ****
 
 
 
@@ -671,67 +672,6 @@ hei_results %>%
   select(fdc_id, gtin_upc, food_groups_matched, n_matches, hei_total, starts_with("score_"))
 
 
-compute_hei <- function(food_list, fped, fndds) {
-
-  diet <- food_list %>%
-    left_join(fped, by = "FOODCODE") %>%
-    left_join(fndds, by = "FOODCODE") %>%
-    mutate(scale = grams / 100) %>%
-    mutate(across(
-      c(F_TOTAL, F_CITMLB, F_OTHER,
-        V_TOTAL, V_DRKGR, V_LEGUMES,
-        G_WHOLE, G_REFINED, D_TOTAL,
-        PF_MPS_TOTAL, PF_EGGS, PF_NUTSDS, PF_SOY, PF_LEGUMES,
-        PF_SEAFD_HI, PF_SEAFD_LOW,
-        ADD_SUGARS,
-        KCAL, SODIUM, SATFAT, MUFA, PUFA),
-      ~ . * scale
-    ))
-
-  totals <- diet %>%
-    summarise(
-      KCAL = sum(KCAL, na.rm = TRUE),
-      F_TOTAL = sum(F_TOTAL, na.rm = TRUE),
-      FWHOLEFRT = sum(F_CITMLB + F_OTHER, na.rm = TRUE),
-      VTOTALLEG = sum(V_TOTAL + V_LEGUMES, na.rm = TRUE),
-      VDRKGRLEG = sum(V_DRKGR + V_LEGUMES, na.rm = TRUE),
-      G_WHOLE = sum(G_WHOLE, na.rm = TRUE),
-      G_REFINED = sum(G_REFINED, na.rm = TRUE),
-      D_TOTAL = sum(D_TOTAL, na.rm = TRUE),
-      PFALLPROTLEG = sum(PF_MPS_TOTAL + PF_EGGS + PF_NUTSDS + PF_SOY + PF_LEGUMES * 4, na.rm = TRUE),
-      PFSEAPLANTLEG = sum(PF_SEAFD_HI + PF_SEAFD_LOW + PF_NUTSDS + PF_SOY + PF_LEGUMES * 4, na.rm = TRUE),
-      ADD_SUGARS = sum(ADD_SUGARS, na.rm = TRUE),
-      SODIUM = sum(SODIUM, na.rm = TRUE),
-      SATFAT = sum(SATFAT, na.rm = TRUE),
-      MONOPOLY = sum(MUFA + PUFA, na.rm = TRUE)
-    )
-
-  kcal <- totals$KCAL
-  if (kcal <= 0) stop("Invalid kcal")
-
-  scores <- c(
-    score_adequacy(totals$F_TOTAL,        kcal, 0.8,  5),
-    score_adequacy(totals$FWHOLEFRT,      kcal, 0.4,  5),
-    score_adequacy(totals$VTOTALLEG,      kcal, 1.1,  5),
-    score_adequacy(totals$VDRKGRLEG,      kcal, 0.2,  5),
-    score_adequacy(totals$G_WHOLE,        kcal, 1.5, 10),
-    score_adequacy(totals$D_TOTAL,        kcal, 1.3, 10),
-    score_adequacy(totals$PFALLPROTLEG,   kcal, 2.5,  5),
-    score_adequacy(totals$PFSEAPLANTLEG,  kcal, 0.8,  5),
-    score_fattyacid(totals$MONOPOLY,      totals$SATFAT),
-    score_moderation_density(totals$G_REFINED, kcal, 1.8, 4.3),
-    score_sodium(totals$SODIUM, kcal),
-    score_addsug(totals$ADD_SUGARS, kcal),
-    score_satfat(totals$SATFAT, kcal)
-  )
-
-  return(list(
-    total_score = sum(scores),
-    component_scores = scores,
-    totals = totals
-  ))
-}
-
 # recall that food_group_summary is the breakdown of each component,
 # want to use this as our constraint for choosing product for a basket
 food_group_summary
@@ -739,7 +679,7 @@ food_group_summary
 # group all protein together
 food_group_summary2 <- food_group_summary %>%
   mutate(group2 = case_when(
-    group %in% c("is_meat", "is_seafood", "is_legume", "is_nutseed") ~ "protein",
+    group %in% c("is_meat", "is_seafood", "is_legume", "is_nutseed") ~ "is_protein",
     TRUE ~ group
   )) %>%
   group_by(group2) %>%
@@ -749,37 +689,57 @@ food_group_summary2 <- food_group_summary %>%
   ) %>%
   arrange(desc(n))
 
+food_group_summary2
+
 basket_items <- df %>%
   sample_n(10)
+basket_items
 
 basket_fped <- df_with_fped %>%
   filter(fdc_id %in% basket_items$fdc_id)
 
-simulate_baskets <- function(df, hei_input, n = 500, basket_size = 10) {
+valid_ids <- hei_input_valid$fdc_id
 
+simulate_baskets <- function(valid_ids, hei_input, n = 500, basket_size = 10) {
   replicate(n, {
-
-    basket <- df %>% sample_n(basket_size)
-
+    basket_ids <- sample(valid_ids, basket_size)
     result <- compute_hei_products(
-      fdc_ids = basket$fdc_id,
-      grams   = rep(100, basket_size),  # or real grams if you have them
+      fdc_ids = basket_ids,
+      grams   = rep(100, basket_size),
       hei_input = hei_input
     )
-
     result$total_score
-
   })
 }
 
 set.seed(13)
-hei_dist <- simulate_baskets(df, hei_input, n = 1000)
+hei_dist <- simulate_baskets(valid_ids, hei_input_valid, n = 1000)
+
+# simulate_baskets <- function(df, hei_input, n = 500, basket_size = 10) {
+#
+#   replicate(n, {
+#
+#     basket <- df %>% sample_n(basket_size)
+#
+#     result <- compute_hei_products(
+#       fdc_ids = basket$fdc_id,
+#       grams   = rep(100, basket_size),  # or real grams if you have them
+#       hei_input = hei_input
+#     )
+#
+#     result$total_score
+#
+#   })
+# }
+# set.seed(13)
+# hei_dist <- simulate_baskets(df, hei_input, n = 1000)
 
 hist(hei_dist,
      breaks = 30,
      main = "Distribution of Simulated HEI Scores",
      xlab = "HEI Score",
      col = "gray")
+summary(hei_dist)
 
 # --- Example usage ---
 compute_hei_products(
