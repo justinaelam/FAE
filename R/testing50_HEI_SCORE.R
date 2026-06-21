@@ -40,18 +40,6 @@ df <- top50_by_category %>%
   )
 
 
-
-# # Qian's merge_nutrient df, (branded_food joined with nutrition)
-# df_nutrient <- read_csv("dataraw/merge_nutrient.csv")
-# # limitation with df_nutrient
-# intersect(df$fdc_id, df_nutrient$fdc_id)
-# # [1] 1114534 1108092  948896
-# intersect(df$gtin_upc, df_nutrient$gtin_upc)
-# # [1] "014500013521" "073472001011" "073461976030" "038900004071" "024000507932" "041383090738" "044100164453" "850687110529"
-# # [9] "041736000285" "076808502947" "076808003895" "024842112110" "024000162995" "190569124733" "041331028745" "052159005207"
-# # [17] "854074006211"
-
-
 # -------- Nutrients are per-serving --> normalize to per-100g (taken from Youcef's code) -------
 df <- df %>%
   mutate(
@@ -71,19 +59,8 @@ df <- df %>%
     fiber_100g          = `Fiber, total dietary`      * scale,
     sugar_100g          = `Sugars, Total`             * scale,
     added_sugar_100g    = `Sugars, added`             * scale
-  ) # %>%
-# # Remove extreme outliers (likely data entry errors)
-# filter(
-#   is.na(sodium_100g)    | sodium_100g    < 10000,   # >10g Na/100g is impossible
-#   is.na(calories_100g)  | calories_100g  < 2000     # >2000 kcal/100g is impossible
-# )
+  )
 
-# x <- df2 %>%
-#   filter(
-#     sodium_100g   >= 10000 |
-#       calories_100g >= 2000
-#   ) %>%
-#   select(fdc_id, ingredients, serving_size, serving_size_g, sodium_100g, calories_100g)
 
 
 
