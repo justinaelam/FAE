@@ -572,6 +572,21 @@ score_fattyacid <- function(monopoly_g, satfat_g, max_pts = 10) {
 plate_groups <- c("is_protein", "is_vegetable", "is_dairy",
                   "is_refinedgrain", "is_fruit", "is_wholegrain")
 
+# added food_group_summary2
+
+food_group_summary2 <- food_group_summary %>%
+  mutate(group2 = case_when(
+    group %in% c("is_meat", "is_seafood", "is_legume", "is_nutseed") ~ "is_protein",
+    TRUE ~ group
+  )) %>%
+  group_by(group2) %>%
+  summarise(
+    n = sum(n),
+    pct = sum(pct)
+  ) %>%
+  arrange(desc(n))
+
+
 slot_allocation <- food_group_summary2 %>%
   filter(group2 %in% plate_groups) %>%
   mutate(
@@ -715,8 +730,10 @@ simulate_proportional_baskets <- function(classified_input, slot_allocation,
     message(n - length(successes), " baskets failed and were dropped")
 
   tibble(
+    basket_id  = seq_along(successes),
     hei_total  = map_dbl(successes, "total_score"),
-    total_kcal = map_dbl(successes, "total_kcal")
+    total_kcal = map_dbl(successes, "total_kcal"),
+    basket     = map(successes, "basket")
   )
 }
 
@@ -738,5 +755,22 @@ hist(basket_sims$hei_total,
      main   = "HEI Distribution of Baskets (10 products, 100g each)",
      xlab   = "HEI-2020 Score")
 
+# -------- 6/26/2026, gather baskets with hei score >= 80 ----------------
+
+healthy_basket <- basket_sims %>%
+  filter(hei_total >= 80)
+nrow(healthy_basket)
+
+hist(healthy_basket$total_kcal,
+     breaks = 30,
+     main   = "Total kcal of Baskets (10 products, 100g each)",
+     xlab   = "HEI-2020 Score") # going to have to normalize this
 
 
+# example of healthy basket, 89 HEI score
+healthy_basket$basket[[1]]
+healthy_basket$hei_total[1]
+
+# example of unhealthy basket, 60 HEI score
+basket_sims$basket[[2]]
+basket_sims$hei_total[2]
