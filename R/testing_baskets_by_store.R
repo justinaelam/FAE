@@ -3,7 +3,7 @@
 # Last updated: 6/29/2026
 #
 # Goal: Compute HEI-2020 scores for branded food baskets using USDA FoodData
-#       Central and FPED data. Simulates baskets both globally and per store.
+#       Central and FPED data. Simulates baskets per store.
 #
 # Inputs:
 #   dataraw/nutrient.csv            - USDA nutrient definitions
@@ -13,7 +13,6 @@
 #   baskets_by_store/*.csv          - Nielsen scanner data, one file per store
 #
 # Outputs:
-#   basket_sims         - tibble of N_BASKETS_GLOBAL simulated baskets (global pool)
 #   all_store_sims      - tibble of N_BASKETS_PER_STORE baskets per store
 #   store_hei_summary   - per-store mean/median/sd HEI summary
 # =============================================================================
@@ -436,7 +435,7 @@ df_with_fped <- df_matched %>%
          FOODCODE, fped_description, all_of(nutrient_cols))
 
 cat("\nUnique products matched:", df_with_fped %>% distinct(fdc_id) %>% nrow(),
-    "of", nrow(df), "\n")
+    "of", nrow(df), "\n") # poster
 
 df_with_fped %>%
   count(fdc_id, name = "n_matches") %>%
@@ -627,6 +626,15 @@ hei_input_classified <- hei_input %>%
     )
   )
 
+hei_input_classified <- hei_input_classified %>%
+  mutate(
+    grain_type = case_when(
+      is.na(grain_type) & str_detect(food_groups_matched, "is_wholegrain")   ~ "wholegrain",
+      is.na(grain_type) & str_detect(food_groups_matched, "is_refinedgrain") ~ "refined",
+      TRUE ~ grain_type
+    )
+  )
+
 cat("\nProduct pool by group:\n")
 hei_input_classified %>%
   count(primary_group, grain_type) %>%
@@ -700,6 +708,15 @@ compute_hei_products <- function(fdc_ids, grams, hei_input) {
 build_proportional_basket <- function(classified_input,
                                       slot_allocation,
                                       grams_per_slot = GRAMS_PER_SLOT) {
+  # # --- patch: backfill grain_type from food_groups_matched where missing ---
+  # classified_input <- classified_input %>%
+  #   mutate(
+  #     grain_type = case_when(
+  #       is.na(grain_type) & str_detect(food_groups_matched, "is_wholegrain")   ~ "wholegrain",
+  #       is.na(grain_type) & str_detect(food_groups_matched, "is_refinedgrain") ~ "refined",
+  #       TRUE ~ grain_type
+  #     )
+  #   )
 
   pool_for <- function(grp, data) {
     switch(grp,
@@ -713,7 +730,7 @@ build_proportional_basket <- function(classified_input,
     )
   }
 
-  safe_sample <- function(pool, n, label) {
+  safe_sample <- function(pool, n, label) { # need to fix
     if (nrow(pool) == 0) stop(paste("Empty pool:", label))
     if (nrow(pool) < n) {
       warning(paste(label, "pool size", nrow(pool), "< slots", n,
@@ -724,7 +741,7 @@ build_proportional_basket <- function(classified_input,
     }
   }
 
-  basket <- map_dfr(seq_len(nrow(slot_allocation)), function(i) {
+  basket <- map_dfr(seq_len(nrow(slot_allocation)), function(i) { # make sure this runs
     grp  <- slot_allocation$group2[i]
     n    <- slot_allocation$slots[i]
     pool <- pool_for(grp, classified_input)
@@ -790,32 +807,7 @@ summary(basket_sims$days_in_basket)
 
 
 # =============================================================================
-# 19. HISTOGRAM 1 — Global simulated baskets
-# =============================================================================
-
-p1 <- ggplot(basket_sims, aes(x = hei_total)) +
-  geom_histogram(binwidth = 2, fill = "#4472C4", color = "white", alpha = 0.85) +
-  geom_vline(xintercept = median(basket_sims$hei_total),
-             linetype = "dashed", color = "red", linewidth = 0.8) +
-  annotate("text",
-           x     = median(basket_sims$hei_total) + 1,
-           y     = Inf, vjust = 2,
-           label = paste0("Median = ", round(median(basket_sims$hei_total), 1)),
-           color = "red", size = 3.5) +
-  labs(
-    title    = "HEI-2020 Score Distribution of Simulated Baskets",
-    x = "HEI-2020 Total Score (0–100)",
-    y = "Number of Baskets"
-  ) +
-  theme_minimal(base_size = 13)
-
-p1
-# another option is putting the summary statistics
-summary(basket_sims$hei_total)
-
-
-# =============================================================================
-# 20. PER-STORE BASKET SIMULATION
+# 19. PER-STORE BASKET SIMULATION
 # =============================================================================
 # For each store:
 #   1. Filter hei_input_classified to products that store carries (fdc_id match)
@@ -865,26 +857,63 @@ simulate_store_baskets <- function(store_df,
     )
 }
 
+# =============================================================================
+# RUN — wrapped in safely() so per-store failures (e.g. "Empty pool: is_fruit")
+# surface with their real error message instead of silently vanishing via compact()
+# =============================================================================
+safe_simulate <- safely(simulate_store_baskets)
 
-all_store_sims <- map(good_data, simulate_store_baskets, .progress = TRUE) %>%
+all_store_results <- map(good_data, safe_simulate, .progress = TRUE)
+
+all_store_sims <- map(all_store_results, "result") %>%
   compact() %>%
   bind_rows()
 
+store_errors <- map(all_store_results, "error") %>%
+  compact()
 
 
-# ── Coverage diagnostics ──────────────────────────────────────────────────────
+# ── Coverage diagnostics ────────────────────────────────────────────────────── # need to get all 337 stores to match.
 cat("\nStores successfully simulated:",
     n_distinct(all_store_sims$store_code), "of", length(data_list), "\n")
-# only 46 out of 337 stores had enough products matched to the HEI-classified dataset to successfully simulate baskets
-# all other stores did not meet the slot allocation threshold
+# some improvement now, 280 out of 337
 
-cat("\nn_matched per store (products in HEI pipeline):\n")
-all_store_sims %>%
-  distinct(store_code, n_matched) %>%
-  pull(n_matched) %>%
-  summary() %>%
+
+failed_stores <- setdiff(
+  map_chr(good_data, ~ as.character(.x$store_code_uc[1])),
+  as.character(unique(all_store_sims$store_code))
+) # 57 stores that did not make the slot allocation
+
+# ── Which stores failed, and why (per-group coverage check) ────────────────
+group_coverage_full <- map_dfr(good_data, function(store_df) {
+  store_fdc_ids <- store_df %>% filter(!is.na(fdc_id)) %>% pull(fdc_id) %>% unique()
+  store_classified <- hei_input_classified %>% filter(fdc_id %in% store_fdc_ids)
+
+  tibble(
+    store_code      = store_df$store_code_uc[1],
+    n_protein       = sum(store_classified$primary_group == "protein", na.rm = TRUE),
+    n_vegetable     = sum(store_classified$primary_group == "veg", na.rm = TRUE),
+    n_dairy         = sum(store_classified$primary_group == "dairy", na.rm = TRUE),
+    n_fruit         = sum(store_classified$primary_group == "fruit", na.rm = TRUE),
+    n_refinedgrain  = sum(store_classified$grain_type == "refined", na.rm = TRUE),
+    n_wholegrain    = sum(store_classified$grain_type == "wholegrain", na.rm = TRUE)
+  ) %>%
+    mutate(passes_all_groups = if_all(starts_with("n_"), ~ .x >= 1))
+})
+
+cat("\nStores passing full 6-group coverage check:",
+    sum(group_coverage_full$passes_all_groups), "of", nrow(group_coverage_full), "\n")
+
+cat("\nGroup-level zero counts among FAILING stores:\n")
+group_coverage_full %>%
+  filter(!passes_all_groups) %>%
+  summarise(across(starts_with("n_"), ~ sum(.x == 0))) %>%
   print()
-# n-matched is the number of products in a store that were successfully matched to HEI-classified dataset
+
+#   n_protein n_vegetable n_dairy n_fruit n_refinedgrain n_wholegrain
+#     <int>       <int>   <int>   <int>          <int>        <int>
+#       1         0          22       1      34              0           22
+
 
 
 # ── Per-store summary ─────────────────────────────────────────────────────────
@@ -903,49 +932,89 @@ store_hei_summary <- all_store_sims %>%
 print(store_hei_summary)
 
 good_basket <- all_store_sims %>%
-  filter(hei_total >= 80) # 282 obs
+  filter(hei_total >= 80) # 1,461 obs
 
-gg <- good_basket %>% #looks weird
-  ggplot(aes(x = hei_total, y = total_kcal)) +
-  labs(title = "HEI score per basket and total kcal",
-       x = "HEI score",
-       y = "total Kcal") + geom_smooth(method = "lm", color = "blue", se = FALSE) +
-  geom_point() +
-  theme_minimal(base_size = 13)
-gg
 
 # get the idx of the highest hei score, get basket
 idx <- which.max(good_basket$hei_total)
 best_basket <- good_basket$basket[[idx]]
 best_basket
 
-# hei score and kcal scale scatter plot of just good baskets?
+# =============================================================================
+# possible graphs
+# =============================================================================
+
+top_n_per_store <- 5
+good_hei_threshold <- 80
 
 g <- all_store_sims %>%
-  ggplot(aes(x = hei_total, y = kcal_scale)) +
-  geom_point()
-g
-
-# lower kcal count is associated with higher hei score?, looks at 46 out of 337 stores had enough products matched
-# "Do stores with higher HEI baskets also have more calories?"
-g <- store_hei_summary %>%
-  ggplot(aes(x = mean_hei, y = mean_kcal)) +
-  labs(title = "HEI score per store and its kcal means",
-       x = "HEI mean",
-       y = "Kcal mean") + geom_smooth(method = "lm", color = "blue", se = FALSE) +
-  geom_point() +
-  theme_minimal(base_size = 13)
-g
-
-# =============================================================================
-# 21. HISTOGRAM 2 — Per-store mean HEI
-# =============================================================================
-
-# wonder if a table would be nicer to show...? only 46 obs
-
-store_hei_summary %>%
-  ggplot(aes(x = mean_hei)) +
+  ggplot(aes(x = hei_total)) +
   geom_histogram() +
-  labs(title = "Distribution of Mean HEI by valid simulated basket") +
-  theme_minimal(base_size = 13)
+  labs(title = "Distribution of HEI-2020 Scores across all simulated baskets") +
+  theme_minimal()
+g
+
+
+top_baskets_per_store <- all_store_sims %>%
+  group_by(store_code) %>%
+  slice_max(hei_total, n = top_n_per_store, with_ties = FALSE) %>%
+  ungroup()
+
+gg <- top_baskets_per_store %>%
+  ggplot(aes(x = hei_total)) +
+  geom_histogram() +
+  geom_vline(xintercept = good_hei_threshold, linetype = "dashed", color = "black") +
+  labs(
+    title    = paste("Distribution of Top", top_n_per_store, "HEI Scores per Store"),
+    x = "HEI Total Score",
+    y = "Number of Baskets"
+  ) +
+  theme_minimal()
+gg
+
+
+# =============================================================================
+# Scatterplot: store-level mean HEI score vs. mean kcal
+# =============================================================================
+store_summary <- all_store_sims %>%
+  group_by(store_code, channel_name) %>%
+  summarise(
+    mean_hei    = mean(hei_total, na.rm = TRUE),
+    mean_kcal   = mean(total_kcal, na.rm = TRUE),
+    n_baskets   = n(),
+    pct_good    = mean(hei_total >= good_hei_threshold) * 100,  # % of that store's baskets scoring "good"
+    .groups = "drop"
+  )
+
+ggplot(store_summary, aes(x = mean_hei, y = mean_kcal)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    title = "Store-Level Mean HEI Score vs. Mean Basket Kcal",
+    x = "Mean Total Kcal per Basket",
+    y = "Mean HEI Total Score"
+    ) +
+  theme_minimal()
+
+# =============================================================================
+# exploratory analysis:
+# correlation test of hei and kcal
+# same three views using only "good" baskets (hei_total >= 80)
+# =============================================================================
+cor.test(store_summary$mean_hei, store_summary$mean_kcal)
+# -0.4087615 and statistically significant (p < 0.05)
+# interpretation: as kcal increases, hei score tends to go down across stores
+
+# cor.test(all_store_sims$hei_total, all_store_sims$total_kcal)
+
+
+
+good_basket
+
+cat("\n'Good' baskets (HEI >=", good_hei_threshold, "):",
+    nrow(good_basket), "of", nrow(all_store_sims),
+    sprintf("(%.1f%%)\n", 100 * nrow(good_basket) / nrow(all_store_sims)))
+
+cat("Stores with at least one 'good' basket:",
+        n_distinct(good_basket$store_code), "of", n_distinct(all_store_sims$store_code), "\n")
 
