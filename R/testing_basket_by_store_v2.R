@@ -912,7 +912,7 @@ group_coverage_full %>%
 
 #   n_protein n_vegetable n_dairy n_fruit n_refinedgrain n_wholegrain
 #     <int>       <int>   <int>   <int>          <int>        <int>
-#       1         0          22       1      34              0           22
+#        0          22       1      34              0           22
 
 
 
@@ -960,18 +960,26 @@ top_baskets_per_store <- all_store_sims %>%
   slice_max(hei_total, n = top_n_per_store, with_ties = FALSE) %>%
   ungroup()
 
+
 gg <- top_baskets_per_store %>%
   ggplot(aes(x = hei_total)) +
-  geom_histogram() +
-  geom_vline(xintercept = good_hei_threshold, linetype = "dashed", color = "black") +
+  geom_histogram(fill = "#2E5F6D") +
+  geom_vline(xintercept = good_hei_threshold, linetype = "dashed", color = "firebrick") +
+  annotate("text", x = mean(top_baskets_per_store$hei_total), y = Inf,
+           label = paste0("Mean: ", round(mean(top_baskets_per_store$hei_total), 2)),
+           hjust = -0.1, vjust = 2, size = 3.5, color = "firebrick") +
   labs(
     title    = paste("Distribution of Top", top_n_per_store, "HEI Scores per Store"),
     x = "HEI Total Score",
     y = "Number of Baskets"
   ) +
-  theme_minimal()
+  theme_minimal(base_size = 14)
 gg
 
+summary(top_baskets_per_store$hei_total)
+
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
+# 60.75   77.80   81.22   81.02   84.91   97.03
 
 # =============================================================================
 # Scatterplot: store-level mean HEI score vs. mean kcal
@@ -1002,7 +1010,7 @@ ggplot(store_summary, aes(x = mean_hei, y = mean_kcal)) +
 # same three views using only "good" baskets (hei_total >= 80)
 # =============================================================================
 cor.test(store_summary$mean_hei, store_summary$mean_kcal)
-# -0.4087615 and statistically significant (p < 0.05)
+# -0.4087615 and statistically significant (p < 0.05). not that strongly correlated?
 # interpretation: as kcal increases, hei score tends to go down across stores
 
 # cor.test(all_store_sims$hei_total, all_store_sims$total_kcal)
